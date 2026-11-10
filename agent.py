@@ -5,6 +5,18 @@ import sqlite3
 import requests
 from playwright.async_api import async_playwright
 
+----------------------------------
+import requests
+
+# Твои данные для Telegram
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CHAT_ID = "775383357"
+
+# Отправляем тестовое сообщение
+test_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+requests.post(test_url, json={"chat_id": CHAT_ID, "text": "🔔 Тестовый запуск! Бот работает отлично!"})
+---------------------------------------------------------------------------------------------------------------
+
 # ==============================================================================
 # 1. НАСТРОЙКИ И КОНФИГУРАЦИЯ
 # ==============================================================================
