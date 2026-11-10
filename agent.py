@@ -10,7 +10,7 @@ from playwright.async_api import async_playwright
 # ==============================================================================
 
 # Токен бота и Chat ID из Telegram
-TELEGRAM_BOT_TOKEN = "9124072670:AAFRQvxf_pIFhdGyNLYJrvLGyYVTWlR7Sw0"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = "775383357"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
