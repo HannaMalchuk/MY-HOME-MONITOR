@@ -1,0 +1,30 @@
+name: Real Estate Agent
+
+on:
+  schedule:
+    # Автоматический запуск каждые 30 минут
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Позволяет запускать бота вручную кнопкой
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests playwright google-genai
+          playwright install chromium
+
+      - name: Run script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python agent.py
