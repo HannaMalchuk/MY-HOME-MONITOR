@@ -79,8 +79,9 @@ def collect_stats():
             data_rows = []
             seen_links = set()
 
-            # Увеличили диапазон до 5 страниц
-            for page_num in range(1, 6):  
+            # Автоматический сбор ВСЕХ страниц до конца каталога
+            page_num = 1
+            while True:
                 target_url = f"{base_url}&p={page_num}" if page_num > 1 else base_url
                 try:
                     page.goto(target_url, timeout=40000)
@@ -99,10 +100,12 @@ def collect_stats():
                     if not articles:
                         articles = page.locator("div.re-search-result").all()
 
-                    # Если на странице вообще нет объявлений (дошли до конца каталога), прерываем цикл страниц
+                    # Если на странице нет объявлений, значит мы дошли до конца каталога
                     if not articles:
-                        print(f"  -> Страница {page_num} пуста, переходим к следующему региону.")
+                        print(f"  -> Страница {page_num} пуста. Все страницы по региону {region_name} собраны.")
                         break
+
+                    page_listings_count = 0
 
                     for article in articles:
                         try:
@@ -115,6 +118,7 @@ def collect_stats():
                             if full_link in seen_links:
                                 continue
                             seen_links.add(full_link)
+                            page_listings_count += 1
 
                             card_text = article.inner_text()
                             title = link_elem.inner_text().strip()
@@ -170,8 +174,17 @@ def collect_stats():
                             })
                         except Exception:
                             continue
+
+                    # Если на текущей странице все ссылки дублируются или карточек нет, останавливаемся
+                    if page_listings_count == 0:
+                        print(f"  -> Новых уникальных объявлений на странице {page_num} нет. Завершаем сбор для {region_name}.")
+                        break
+
+                    page_num += 1
+
                 except Exception as e:
-                    print(f"Ошибка на странице {page_num}: {e}")
+                    print(f"Ошибка на странице {page_num} региона {region_name}: {e}")
+                    break
 
             # Заглушка, если пусто
             if not data_rows:
@@ -213,7 +226,7 @@ def send_email(file_path):
     msg['To'] = RECEIVER_EMAIL
     msg['Subject'] = f"🏠 База недвижимости (Playwright) — {datetime.date.today()}"
 
-    body = "Привет! Отчет собран с помощью браузерного движка Playwright (проверено 5 страниц по каждому региону). Все блоки прогружены, защиты обойдены."
+    body = "Привет! Отчет собран с помощью браузерного движка Playwright (просмотрены все доступные страницы по регионам до конца). Все блоки прогружены, защиты обойдены."
     msg.attach(MIMEText(body, 'plain'))
 
     with open(file_path, "rb") as f:
