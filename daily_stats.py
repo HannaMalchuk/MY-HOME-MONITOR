@@ -88,12 +88,15 @@ def collect_stats():
     excel_file = f"Idealista_Daily_Report_{datetime.date.today()}.xlsx"
     writer = pd.ExcelWriter(excel_file, engine='openpyxl')
 
-    # Заголовки для имитации реального мобильного приложения iOS
+    # Использование продвинутых заголовков эмуляции десктопного браузера Chrome
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9",
-        "Cache-Control": "no-cache"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
 
     for region_name, target_url in REGIONS.items():
@@ -101,7 +104,11 @@ def collect_stats():
         data_rows = []
         
         try:
-            response = requests.get(target_url, headers=headers, timeout=20)
+            # Делаем запрос через сессию с сохранением кук
+            session = requests.Session()
+            session.get("https://www.idealista.com/", headers=headers, timeout=15)
+            response = session.get(target_url, headers=headers, timeout=20)
+            
             print(f"Статус ответа для {region_name}: {response.status_code}")
             
             if response.status_code == 200:
@@ -151,23 +158,14 @@ def collect_stats():
                     except Exception as e:
                         print(f"Ошибка парсинга элемента: {e}")
 
-            # Если сработала защита Cloudflare (код 403) или карточки не получены,
-            # генерируем качественный демонстрационный срез по вашим параметрам,
-            # чтобы отчет не был пустым и расчет средних цен за м² работал корректно.
             if not data_rows:
-                print(f"Включение резервного режима для {region_name} из-за защиты сайта")
-                base_prices = {"Мадрид": 135000, "Толедо": 95000, "Гвадалахара": 110000}
-                base_areas = {"Мадрид": 65, "Толедо": 75, "Гвадалахара": 80}
-                p = base_prices.get(region_name, 120000)
-                a = base_areas.get(region_name, 70)
-                
                 data_rows.append({
-                    "Название / Адрес": f"Пример объекта в регионе {region_name} (Фильтрация активна)",
-                    "Цена (€)": p,
-                    "Площадь (м²)": a,
-                    "Комнат": 2,
-                    "Цена за м² (€)": round(p / a, 2),
-                    "Статус / Причина отфильтровки": "ОДОБРЕНО (Соответствует параметрам)",
+                    "Название / Адрес": f"⚠️ Защита Cloudflare заблокировала доступ (Код: {response.status_code})",
+                    "Цена (€)": 0,
+                    "Площадь (м²)": 0,
+                    "Комнат": 0,
+                    "Цена за м² (€)": 0,
+                    "Статус / Причина отфильтровки": "Требуется обход защиты IP",
                     "Ссылка": target_url
                 })
 
@@ -176,7 +174,6 @@ def collect_stats():
 
         df = pd.DataFrame(data_rows)
         
-        # Расчет средней цены за м² для вкладки
         if not df.empty and df[df["Цена (€)"] > 0].shape[0] > 0:
             valid_df = df[df["Цена (€)"] > 0]
             avg_price_m2 = valid_df["Цена за м² (€)"].mean()
