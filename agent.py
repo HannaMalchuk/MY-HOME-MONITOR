@@ -5,33 +5,25 @@ import sqlite3
 import requests
 from playwright.async_api import async_playwright
 
-
-import requests
-
-# Твои данные для Telegram
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-CHAT_ID = "775383357"
-
-# Отправляем тестовое сообщение
-test_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-requests.post(test_url, json={"chat_id": CHAT_ID, "text": "🔔 Тестовый запуск! Бот работает отлично!"})
-
-
 # ==============================================================================
 # 1. НАСТРОЙКИ И КОНФИГУРАЦИЯ
 # ==============================================================================
 
-# Токен бота и Chat ID из Telegram
+# Токен бота и Chat ID из Telegram (подтягиваются из секретов GitHub)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = "775383357"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# ИЗМЕНЕННЫЕ ССЫЛКИ: Сам Мадрид (город) + Провинция Толедо (Ла-Сагра)
+# РАСШИРЕННЫЕ ССЫЛКИ: Мадрид (город + область), Толедо (провинция), Гвадалахара
 TARGET_URLS = [
-    # Мадрид (сам город) с фильтрами: цена до 145k, от 60м², от 2 комнат
+    # 1. Мадрид (весь город)
     "https://www.idealista.com/venta-viviendas/madrid/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
-    # Провинция Толедо (Ла-Сагра и окрестности)
-    "https://www.idealista.com/venta-viviendas/toledo-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/"
+    # 2. Сообщество Мадрид (вся область / пригороды)
+    "https://www.idealista.com/venta-viviendas/madrid-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
+    # 3. Провинция Толедо (включая Ла-Сагру)
+    "https://www.idealista.com/venta-viviendas/toledo-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
+    # 4. Провинция Гвадалахара (ближняя зона / коридор Энарес до ~60 км)
+    "https://www.idealista.com/venta-viviendas/guadalajara-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/"
 ]
 
 # Параметры фильтрации в коде
@@ -39,16 +31,30 @@ MAX_PRICE = 145000.0
 MIN_AREA = 60.0
 MIN_ROOMS = 2
 
-# Опасные и неблагополучные города/районы (Черный список)
+# РАСШИРЕННЫЙ ЧЕРНЫЙ СПИСОК (Криминал, оккупасы, наркотрафик, гетто, риск DANA)
 FORBIDDEN_LOCATIONS = [
-    # Опасные городки Ла-Сагры (Okupas / Криминал)
+    # --- Ла-Сагра (Толедо): оккупасы, депрессивные зоны ---
     "chozas de canales", "chozas", "lominchar", "recas", 
     "seseña", "sesena", "quiñon", "quiñón", "yuncos", "yeles",
-    # Зоны риска паводков и затоплений (DANA)
-    "cobeja", "magan", "magán",
-    # Неблагополучные зоны Мадрида и пригородов
-    "parla", "valdemingomez", "valdemingómez", "cañada real", "alhondiga", "alhóndiga",
-    "el gorronal", "gorronal"
+    "pantoja", "esquivias", "numancia de la sagra", "borox", "cabañas de la sagra",
+    
+    # --- Зоны риска паводков и затоплений (DANA) в Толедо/Мадриде ---
+    "cobeja", "magan", "magán", "villaluenga de la sagra", "aranjuez (ciertas zonas)",
+    
+    # --- Юг Мадрида и проблемные зоны (Гетто, криминал, наркотики) ---
+    "valdemingomez", "valdemingómez", "cañada real", "las Barranquillas",
+    "parla", "pinto (san bernardo)", "fuenlabrada (el naranjo)", 
+    "getafe (la alhondiga)", "alhondiga", "alhóndiga",
+    "leganés (zarahonda)", "san martin de la vega", "ciempozuelos",
+    "alcorcón (los pajaritos)", "móstoles (el manantial)",
+    
+    # --- Северо-Запад / Восток Мадрида (проблемные карманы) ---
+    "el gorronal", "gorronal", "collado villalba (estación/gorronal)",
+    "san sebastián de los reyes (rosa de luxemburgo)",
+    
+    # --- Гвадалахара и коридор (депрессивные или отдаленные промышленные зоны) ---
+    "azuqueca de henares (barriadas conflictivas)", "el casar (urbanizaciones sin servicios)",
+    "marchamalo", "yebes", "alovera (ciertas zonas)"
 ]
 
 # Юридические проблемы, оккупасы, аукционы и аварийное жилье
@@ -56,7 +62,7 @@ LEGAL_RISK_WORDS = [
     "okupad", "ocupad", "sin posesion", "sin posesión", "no se puede visitar", 
     "nuda propiedad", "proindiviso", "parte indivisa", "alquilad", "con inquilino",
     "subasta", "cesion de remate", "cesión de remate", "inmueble ilocalizable",
-    "para derribar", "ruina", "sin cedula", "sin cédula"
+    "para derribar", "ruina", "sin cedula", "sin cédula", "okupa", "ocupa"
 ]
 
 # Ключевые слова для "Изюминки" (🔴 Красный маркер)
@@ -111,12 +117,13 @@ def analyze_with_ai(title, description):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""
-    Проанализируй текст объявления о продаже недвижимости в Испании для семьи с маленьким ребенком.
+    Проанализируй текст объявления о продаже недвижимости в Испании (Мадрид, Толедо, Гвадалахара) для семьи с маленьким ребенком.
     Заголовок: {title}
     Описание: {description}
     
+    Оцени безопасность района для ребенка, отсутствие криминала, маргиналов, наркотиков и рисков наводнений (DANA), а также юридическую чистоту.
     Ответь строго в формате JSON с двумя полями:
-    1. "safe_for_living" (boolean): true - если объект пригоден для нормальной покупки и жизни. false - если есть проблемы (оккупасы, арендаторы, продается только доля/nuda propiedad, невозможность визита, аварийное состояние, дом под снос).
+    1. "safe_for_living" (boolean): true - если объект находится в безопасном районе для ребенка и пригоден для покупки. false - если есть проблемы (оккупасы, криминальный/неблагополучный район, наркотики, зоны риска DANA, арендаторы, продается только доля/nuda propiedad, невозможность визита, аварийное состояние).
     2. "reason" (string): Краткое резюме на русском языке (1 предложение), почему объект подходит или почему отклонен.
     """
     
@@ -209,8 +216,9 @@ async def run_agent():
 
                     title_lower = title.lower()
 
-                    # 1. Проверка черного списка локаций
+                    # 1. Проверка расширенного черного списка локаций
                     if any(forbidden in title_lower for forbidden in FORBIDDEN_LOCATIONS):
+                        print(f"Пропущено (Опасный район/Криминал/DANA): {title}")
                         save_property(prop_id, 0, title, status="REJECTED_LOCATION")
                         continue
 
@@ -251,16 +259,16 @@ async def run_agent():
                         save_property(prop_id, price, title, status="REJECTED_SPECS")
                         continue
 
-                    # 3. Дополнительная проверка через Gemini AI
+                    # 3. Дополнительная глубокая проверка через Gemini AI
                     is_safe_ai, ai_note = analyze_with_ai(title, description)
                     if not is_safe_ai:
-                        print(f"Пропущено AI: {title}")
+                        print(f"Пропущено AI (Безопасность/Риски): {title}")
                         save_property(prop_id, price, title, status="REJECTED_AI")
                         continue
 
                     # Определение "Изюминки"
                     is_highlight = any(kw in full_text for kw in HIGHLIGHT_KEYWORDS)
-                    location = title.split("en")[-1].strip() if "en" in title else "Мадрид / Толедо"
+                    location = title.split("en")[-1].strip() if "en" in title else "Мадрид / Толедо / Гвадалахара"
 
                     # Отправка в Telegram
                     send_telegram_msg(
@@ -270,7 +278,8 @@ async def run_agent():
                         rooms=rooms,
                         location=location,
                         link=link,
-                        is_highlight=is_highlight
+                        is_highlight=is_highlight,
+                        ai_note=ai_note
                     )
                     
                     save_property(prop_id, price, title, status="PASSED")
