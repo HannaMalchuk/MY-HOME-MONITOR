@@ -12,15 +12,10 @@ import pandas as pd
 from playwright.sync_api import sync_playwright
 from openpyxl.styles import PatternFill
 
-# ==============================================================================
-# НАСТРОЙКИ И ПАРАМЕТРЫ ПОИСКА (Idealista - Ханна)
-# ==============================================================================
-
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
 SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 
-# Базовые региональные ссылки Idealista без ошибочных параметров в строке
 REGIONS = {
     "Мадрид (Idealista)": "https://www.idealista.com/venta-viviendas/madrid-provincia/",
     "Толедо (Idealista)": "https://www.idealista.com/venta-viviendas/toledo-provincia/",
@@ -69,11 +64,21 @@ def collect_stats():
     writer = pd.ExcelWriter(excel_file, engine='openpyxl')
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
+        # Запускаем браузер с защитой от обнаружения бота
+        browser = p.chromium.launch(
+            headless=True, 
+            args=[
+                "--no-sandbox", 
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage"
+            ]
+        )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800},
-            locale="es-ES"
+            viewport={"width": 1366, "height": 768},
+            locale="es-ES",
+            extra_http_headers={"Accept-Language": "es-ES,es;q=0.9"}
         )
         page = context.new_page()
 
@@ -84,17 +89,16 @@ def collect_stats():
 
             page_num = 1
             while True:
-                # Пагинация на Idealista через /pagina-X.htm
                 if page_num == 1:
                     target_url = base_url
                 else:
                     target_url = f"{base_url.rstrip('/')}/pagina-{page_num}.htm"
 
                 try:
-                    page.goto(target_url, timeout=40000)
-                    time.sleep(random.uniform(3.5, 6.5))
+                    page.goto(target_url, timeout=45000, wait_dom_content_loaded=True)
+                    time.sleep(random.uniform(5.0, 8.0)) # Увеличенная пауза для прохождения проверки
 
-                    # Принимаем куки, если появляется баннер
+                    # Принимаем куки
                     try:
                         cookie_btn = page.locator("button#didomi-notice-agree-button, button.didomi-continue-without-agreeing")
                         if cookie_btn.count() > 0:
@@ -102,27 +106,24 @@ def collect_stats():
                     except:
                         pass
 
-                    # Актуальные селекторы карточек на Idealista
-                    articles = page.locator("article.item").all()
-                    if not articles:
-                        articles = page.locator("div.item-info-container").all()
+                    # Расширенные селекторы для поиска карточек на Idealista
+                    articles = page.locator("article.item, div.item-multimedia, div.item-info-container").all()
 
                     if not articles:
-                        print(f"  -> Страница {page_num} пуста или достигнут конец выдачи Idealista.")
+                        print(f"  -> Страница {page_num} пуста или заблокирована защитой.")
                         break
 
                     page_listings_count = 0
 
                     for article in articles:
                         try:
-                            link_elem = article.locator("a.item-link").first
-                            if link_elem.count() == 0:
-                                link_elem = article.locator("a[href*='/inmueble/']").first
-                            
+                            link_elem = article.locator("a.item-link, a[href*='/inmueble/']").first
                             if link_elem.count() == 0:
                                 continue
 
                             href = link_elem.get_attribute("href")
+                            if not href:
+                                continue
                             full_link = "https://www.idealista.com" + href if not href.startswith('http') else href
                             if full_link in seen_links:
                                 continue
@@ -169,7 +170,7 @@ def collect_stats():
                             if "Отклонено" in status:
                                 continue
 
-                            has_feature = any(hw in card_text.lower() for hw in HIGHLIGHT_WORDS)
+                            has_features = any(hw in card_text.lower() for hw in HIGHLIGHT_WORDS)
 
                             data_rows.append({
                                 "Название": title,
@@ -179,7 +180,7 @@ def collect_stats():
                                 "Дата публикации": str(datetime.date.today()),
                                 "Телефон для связи": "Через сайт",
                                 "Ссылка на страницу объекта": full_link,
-                                "_highlight": has_feature
+                                "_highlight": has_features
                             })
                         except Exception:
                             continue
@@ -188,11 +189,11 @@ def collect_stats():
                         break
 
                     page_num += 1
-                    if page_num > 10: # Ограничение в 10 страниц для безопасности
+                    if page_num > 5: # Ограничим до 5 страниц для стабильности тестов
                         break
 
                 except Exception as e:
-                    print(f"Ошибка на странице {page_num} для {region_name}: {e}")
+                    print(f"Ошибка на странице {page_num}: {e}")
                     break
 
             if not data_rows:
@@ -200,7 +201,7 @@ def collect_stats():
                     "Название": f"Объект в базе ({region_name})",
                     "Стоимость (€)": 145000,
                     "Метры (м²)": 75,
-                    "Описание": "Поиск Idealista завершен.",
+                    "Описание": "Поиск Idealista завершен (проверка защиты).",
                     "Дата публикации": str(datetime.date.today()),
                     "Телефон для связи": "+34 600 000 000",
                     "Ссылка на страницу объекта": base_url,
@@ -233,9 +234,9 @@ def send_email(file_path):
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = RECEIVER_EMAIL
-    msg['Subject'] = f"🏠 База недвижимости (Idealista) — {datetime.date.today()}"
+    msg['Subject'] = f"🏠 База недвижимости (Idealista) — {datetime.date.today()}`"
 
-    body = "Привет! Отчет по порталу Idealista успешно собран с помощью Playwright (с обходом защиты и пагинацией)."
+    body = "Привет! Отчет по порталу Idealista собран с обновленной маскировкой браузера."
     msg.attach(MIMEText(body, 'plain'))
 
     with open(file_path, "rb") as f:
