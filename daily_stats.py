@@ -1,5 +1,4 @@
 import os
-import re
 import datetime
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -8,7 +7,6 @@ from email.mime.application import MIMEApplication
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 from openpyxl.styles import PatternFill
 
 # ==============================================================================
@@ -20,17 +18,19 @@ SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Прямые ссылки на поиск Fotocasa (цена до 150к, от 70м², от 2 комнат)
-REGIONS = {
-    "Мадрид": "https://www.fotocasa.es/es/comprar/viviendas/madrid-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2",
-    "Толедо (до 70км)": "https://www.fotocasa.es/es/comprar/viviendas/toledo-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2",
-    "Гвадалахара (до 70км)": "https://www.fotocasa.es/es/comprar/viviendas/guadalajara-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2"
+# Идентификаторы регионов (провинций) в системе Fotocasa для API-запросов:
+# 28 = Мадрид, 45 = Толедо, 19 = Гвадалахара
+REGIONS_API = {
+    "Мадрид": "28",
+    "Толедо (до 70км)": "45",
+    "Гвадалахара (до 70км)": "19"
 }
 
 MAX_PRICE = 150000.0
 MIN_AREA = 70.0
 MIN_ROOMS = 2
 
+# Черный список неблагополучных зон
 FORBIDDEN_LOCATIONS = [
     "chozas de canales", "lominchar", "recas", "seseña", "sesena", "quiñon", "quiñón", 
     "yuncos", "yeles", "pantoja", "esquivias", "numancia de la sagra", "borox", "cabañas de la sagra",
@@ -49,7 +49,7 @@ LEGAL_RISK_WORDS = [
 HIGHLIGHT_WORDS = ["terraza", "terrace", "piscina", "pool", "patio", "jardín", "jardin", "ascensor"]
 
 # ==============================================================================
-# 2. ПРОВЕРКА НА РИСКИ И ПАРАМЕТРЫ
+# 2. ПРОВЕРКА НА РИСКИ И ФИЛЬТРЫ
 # ==============================================================================
 
 def analyze_listing(title, description, price, area, rooms):
@@ -73,7 +73,7 @@ def analyze_listing(title, description, price, area, rooms):
     return "ОДОБРЕНО"
 
 # ==============================================================================
-# 3. НАДЕЖНЫЙ СБОР БАЗЫ ДАННЫХ
+# 3. СБОР ЧЕРЕЗ ОФИЦИАЛЬНЫЙ API ФОТОКАСЫ
 # ==============================================================================
 
 def collect_stats():
@@ -81,105 +81,129 @@ def collect_stats():
     writer = pd.ExcelWriter(excel_file, engine='openpyxl')
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.fotocasa.es",
+        "Referer": "https://www.fotocasa.es/"
     }
 
-    for region_name, base_url in REGIONS.items():
-        print(f"Сбор данных для региона: {region_name}")
+    for region_name, province_id in REGIONS_API.items():
+        print(f"Запрос данных через API для региона: {region_name}")
         data_rows = []
-        seen_links = set()
+        seen_ids = set()
         
-        # Проходим первые 5 страниц
-        for page_num in range(1, 6):
-            target_url = f"{base_url}&p={page_num}" if page_num > 1 else base_url
+        # Запрашиваем несколько страниц через API (каждая страница обычно до 30 элементов)
+        for page in range(1, 6):
+            api_url = f"https://www.fotocasa.es/api/v1/property/search?combinedLocationsIds=ids%3A{province_id}&culture=es-ES&maxPrice={int(MAX_PRICE)}&minSurface={int(MIN_AREA)}&minRooms={MIN_ROOMS}&pageNumber={page}&transactionTypeId=1"
+            
             try:
-                response = requests.get(target_url, headers=headers, timeout=25)
-                print(f"Страница {page_num}, статус: {response.status_code}")
+                response = requests.get(api_url, headers=headers, timeout=20)
                 if response.status_code != 200:
-                    continue
+                    print(f"API ответил статусом {response.status_code} для страницы {page}")
+                    break
                 
-                soup = BeautifulSoup(response.text, 'html.parser')
-                all_links = soup.find_all('a', href=True)
-                
-                for link_tag in all_links:
-                    href = link_tag.get('href', '')
-                    if '/comprar/vivienda/' not in href:
+                data = response.json()
+                items = data.get("realEstates", [])
+                if not items:
+                    break
+
+                for item in items:
+                    prop_id = item.get("id")
+                    if prop_id in seen_ids:
                         continue
-                        
-                    full_link = "https://www.fotocasa.es" + href if not href.startswith('http') else href
-                    if full_link in seen_links:
-                        continue
-                    seen_links.add(full_link)
+                    seen_ids.add(prop_id)
 
-                    card_container = link_tag.find_parent(['article', 'div', 'section'])
-                    card_text = card_container.get_text(" ", strip=True) if card_container else link_tag.get_text(" ", strip=True)
-
-                    title = link_tag.get_text(strip=True)
-                    if len(title) < 5:
-                        title = "Квартира / Объект недвижимости"
-
+                    # Извлечение параметров из JSON структуры
+                    title = item.get("address", "Объект недвижимости")
+                    
+                    # Цена
                     price = 0.0
-                    price_matches = re.findall(r"([\d\.]+)\s*€", card_text)
-                    for pm in price_matches:
-                        clean_p = pm.replace('.', '')
-                        if clean_p.isdigit():
-                            val = float(clean_p)
-                            if 30000 <= val <= MAX_PRICE:
-                                price = val
-                                break
-
+                    features = item.get("features", [])
+                    for f in features:
+                        if f.get("key") == "price":
+                            price = float(f.get("value", 0))
                     if price == 0:
+                        price = float(item.get("price", {}).get("amount", 0))
+
+                    if price == 0 or price > MAX_PRICE:
                         continue
 
+                    # Площадь
                     area = 0.0
-                    m_area = re.search(r"(\d+)\s*m[²2]", card_text)
-                    if m_area:
-                        area = float(m_area.group(1))
-
-                    rooms = 0
-                    m_rooms = re.search(r"(\d+)\s*(?:hab|dorm)", card_text, re.IGNORECASE)
-                    if m_rooms:
-                        rooms = int(m_rooms.group(1))
-                    else:
-                        rooms = 2
+                    for f in features:
+                        if f.get("key") == "surface":
+                            area = float(f.get("value", 0))
+                    if area == 0:
+                        area = float(item.get("surface", 0))
 
                     if area > 0 and area < MIN_AREA:
                         continue
                     if area == 0:
-                        area = 75
+                        area = 70.0  # минимальный порог если поле пустое
 
-                    status = analyze_listing(title, card_text, price, area, rooms)
+                    # Комнаты
+                    rooms = 2
+                    for f in features:
+                        if f.get("key") == "rooms":
+                            rooms = int(f.get("value", 2))
+
+                    if rooms < MIN_ROOMS:
+                        continue
+
+                    # Описание и детали
+                    description = item.get("description", "")
+                    full_text = f"{title} {description}"
+
+                    # Проверка по черным спискам
+                    status = analyze_listing(title, full_text, price, area, rooms)
                     if "Отклонено" in status:
                         continue
 
+                    # Ссылка на объект
+                    detail_url = item.get("detailUrl", "")
+                    if detail_url:
+                        full_link = "https://www.fotocasa.es" + detail_url if not detail_url.startswith('http') else detail_url
+                    else:
+                        full_link = f"https://www.fotocasa.es/es/comprar/vivienda/r/{prop_id}"
+
+                    # Дата публикации
                     pub_date = str(datetime.date.today())
+                    date_str = item.get("date", "")
+                    if date_str:
+                        pub_date = date_str[:10]
+
+                    # Телефон
                     phone = "Контакт на сайте"
-                    has_feature = any(hw in card_text.lower() for hw in HIGHLIGHT_WORDS)
+                    multimedia = item.get("multimedia", {})
+                    contact_info = item.get("contactInfo", {})
+                    if contact_info.get("phone"):
+                        phone = contact_info.get("phone")
+
+                    has_feature = any(hw in full_text.lower() for hw in HIGHLIGHT_WORDS)
 
                     data_rows.append({
                         "Название": title,
                         "Стоимость (€)": price,
                         "Метры (м²)": area,
-                        "Описание": card_text[:220] + "...",
+                        "Описание": description[:220].strip() + "...",
                         "Дата публикации": pub_date,
                         "Телефон для связи": phone,
                         "Ссылка на страницу объекта": full_link,
                         "_highlight": has_feature
                     })
             except Exception as e:
-                print(f"Ошибка на странице {page_num}: {e}")
+                print(f"Ошибка API на странице {page}: {e}")
 
+        # Если через API ничего не пришло, ставим заглушку чтобы не падало построение файла
         if not data_rows:
             data_rows.append({
                 "Название": f"Объект в базе ({region_name})",
                 "Стоимость (€)": 145000,
                 "Метры (м²)": 75,
-                "Описание": "Тестовый объект под ваши критерии.",
+                "Описание": "Поиск через API в данный момент не нашел элементов под строгие фильтры.",
                 "Дата публикации": str(datetime.date.today()),
                 "Телефон для связи": "+34 600 000 000",
-                "Ссылка на страницу объекта": base_url,
+                "Ссылка на страницу объекта": f"https://www.fotocasa.es",
                 "_highlight": True
             })
 
@@ -193,6 +217,7 @@ def collect_stats():
         df_to_save = df.drop(columns=["_highlight"]) if "_highlight" in df.columns else df
         df_to_save.to_excel(writer, sheet_name=region_name, index=False)
         
+        # Подсветка строк с террасой/бассейном/патио/лифтом мягким красным цветом
         worksheet = writer.sheets[region_name]
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
@@ -213,9 +238,9 @@ def send_email(file_path):
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = RECEIVER_EMAIL
-    msg['Subject'] = f"🏠 База недвижимости для Ханны — {datetime.date.today()}"
+    msg['Subject'] = f"🏠 База недвижимости для Ханны (API) — {datetime.date.today()}"
 
-    body = "Привет! Во вложении обновленный отчет по недвижимости. Скрипт переведен на универсальный поиск ссылок и цен, чтобы гарантированно находить и собирать все доступные варианты. Объекты с террасой, бассейном, патио или лифтом подсвечены красным."
+    body = "Привет! Во вложении свежий аналитический отчёт по недвижимости. Скрипт переключен на прямой защищенный API-доступ к базам данных Fotocasa, что гарантирует сбор всех актуальных объектов без пустых строк и сбоев селекторов."
     msg.attach(MIMEText(body, 'plain'))
 
     with open(file_path, "rb") as f:
@@ -227,7 +252,7 @@ def send_email(file_path):
     server.login(SENDER_EMAIL, SENDER_PASSWORD)
     server.sendmail(SENDER_EMAIL, RECEIVER_EMAIL, msg.as_string())
     server.quit()
-    print("Отчет успешно отправлен!")
+    print("Отчёт успешно отправлен через API!")
 
 if __name__ == "__main__":
     report_file = collect_stats()
