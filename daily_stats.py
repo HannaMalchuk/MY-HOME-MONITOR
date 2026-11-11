@@ -20,30 +20,24 @@ SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Ссылки на поиск Fotocasa (включаем квартиры, дома, дуплексы, шале до 150к, от 70м², от 2 комнат)
+# Ссылки на поиск Fotocasa (квартиры, дома, дуплексы, атико, шале до 150к, от 70м², от 2 комнат)
 REGIONS = {
     "Мадрид": "https://www.fotocasa.es/es/comprar/viviendas/madrid-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2",
-    "Толедо (до 70км)": "https://www.fotocasa.es/es/comprar/viviendas/toledo-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=60&minRooms=2",
-    "Гвадалахара (до 70км)": "https://www.fotocasa.es/es/comprar/viviendas/guadalajara-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=60&minRooms=2"
+    "Толедо (до 70км)": "https://www.fotocasa.es/es/comprar/viviendas/toledo-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2",
+    "Гвадалахара (до 70км)": "https://www.fotocasa.es/es/comprar/viviendas/guadalajara-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2"
 }
 
 MAX_PRICE = 150000.0
 MIN_AREA = 70.0
 MIN_ROOMS = 2
 
-# Чёрный список неблагополучных и опасных зон / зон дальше 70 км
+# Чёрный список неблагополучных и опасных зон / отдаленных районов
 FORBIDDEN_LOCATIONS = [
     "chozas de canales", "chozas", "lominchar", "recas", "seseña", "sesena", "quiñon", "quiñón", 
     "yuncos", "yeles", "pantoja", "esquivias", "numancia de la sagra", "borox", "cabañas de la sagra",
     "cobeja", "magan", "magán", "villaluenga de la sagra", "talavera de la reina", "consuegra",
     "valdemingomez", "valdemingómez", "cañada real", "las barranquillas", "parla", "alhondiga", "alhóndiga",
     "el gorronal", "gorronal", "azuqueca de henares", "marchamalo", "yebes", "sigüenza", "molina de aragón"
-]
-
-# Разрешенные близкие зоны для Толедо и Гвадалахары (в пределах ~70 км от Мадрида)
-ALLOWED_TOLEDO_CLOSE = [
-    "illescas", "aranjuez", "segovia", "bargas", "olías del rey", "mocejón", "cobeja", "numancia",
-    "yuncos", "pantoja", "esquivias", "villaluenga", "recas", "cedillo del condado", "camarena", "fuensalida"
 ]
 
 LEGAL_RISK_WORDS = [
@@ -111,7 +105,6 @@ def collect_stats():
         data_rows = []
         seen_links = set()
         
-        # Сканируем первые 3 страницы для максимального покрытия
         for page_num in range(1, 4):
             target_url = f"{base_url}&p={page_num}" if page_num > 1 else base_url
             try:
@@ -165,25 +158,21 @@ def collect_stats():
                     if area < MIN_AREA or rooms < MIN_ROOMS:
                         continue
 
-                    # Фильтрация по черным спискам
                     status = analyze_listing(title, card_text, price, area, rooms, region_name)
                     if "Отклонено" in status:
                         continue
 
-                    # Дата публикации (имитируем из текста или ставим текущую свежую)
                     pub_date = str(datetime.date.today())
                     if "ayer" in card_text.lower():
                         pub_date = str(datetime.date.today() - datetime.timedelta(days=1))
                     elif "hoy" in card_text.lower():
                         pub_date = str(datetime.date.today())
 
-                    # Телефон для связи (если указан в блоке, иначе контактное лицо портала)
                     phone = "Через сайт Fotocasa"
                     m_phone = re.search(r"(\+34[\s\d]{9,})", card_text)
                     if m_phone:
                         phone = m_phone.group(1).strip()
 
-                    # Проверка на наличие террасы, бассейна, патио для подсветки
                     has_feature = any(hw in card_text.lower() for hw in HIGHLIGHT_WORDS)
 
                     data_rows.append({
@@ -194,12 +183,11 @@ def collect_stats():
                         "Дата публикации": pub_date,
                         "Телефон для связи": phone,
                         "Ссылка на страницу объекта": full_link,
-                        "_highlight": has_feature  к служебному флагу для подсветки
+                        "_highlight": has_feature
                     })
             except Exception as e:
                 print(f"Ошибка на странице {page_num}: {e}")
 
-        # Если ничего не найдено, добавляем тестовый объект по параметрам
         if not data_rows:
             data_rows.append({
                 "Название": f"Премиум апартаменты/дом в регионе {region_name}",
@@ -216,20 +204,17 @@ def collect_stats():
         if not df.empty and "Ссылка на страницу объекта" in df.columns:
             df = df.drop_duplicates(subset=["Ссылка на страницу объекта"])
 
-        # Сортировка: от новых к старым
         if not df.empty and "Дата публикации" in df.columns:
             df = df.sort_values(by="Дата публикации", ascending=False)
 
-        # Сохранение в Excel с оформлением
         df_to_save = df.drop(columns=["_highlight"]) if "_highlight" in df.columns else df
         df_to_save.to_excel(writer, sheet_name=region_name, index=False)
         
-        # Подсветка строк с террасой/бассейном/патио мягким красным цветом
         worksheet = writer.sheets[region_name]
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
         if "_highlight" in df.columns:
-            for idx, val in enumerate(df["_highlight"], start=2): # start=2 из-за шалпки
+            for idx, val in enumerate(df["_highlight"], start=2):
                 if val:
                     for col_idx in range(1, len(df_to_save.columns) + 1):
                         worksheet.cell(row=idx, column=col_idx).fill = red_fill
