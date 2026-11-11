@@ -19,7 +19,6 @@ SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Используем поисковые URL, которые отдают структурированные данные
 REGIONS = {
     "Мадрид": "https://www.idealista.com/venta-viviendas/madrid-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
     "Толедо": "https://www.idealista.com/venta-viviendas/toledo-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
@@ -46,7 +45,7 @@ LEGAL_RISK_WORDS = [
 ]
 
 # ==============================================================================
-# 2. АНАЛИЗАТОР ПРИЧИН ОТКЛОНЕНИЯ
+# 2. АНАЛИЗАТОР
 # ==============================================================================
 
 def analyze_listing(title, description, price, area, rooms):
@@ -82,27 +81,40 @@ def analyze_listing(title, description, price, area, rooms):
     return "ОДОБРЕНО (Отправлено в Telegram)"
 
 # ==============================================================================
-# 3. СБОР ДАННЫХ ЧЕРЕЗ ЭМУЛЯЦИЮ МОБИЛЬНОГО КЛИЕНТА
+# 3. СБОР ДАННЫХ ЧЕРЕЗ СИМУЛЯЦИЮ СТРАНИЦЫ С УЛУЧШЕННЫМИ ЗАГОЛОВКАМИ
 # ==============================================================================
 
 def collect_stats():
     excel_file = f"Idealista_Daily_Report_{datetime.date.today()}.xlsx"
     writer = pd.ExcelWriter(excel_file, engine='openpyxl')
 
-    # Заголовки мобильного браузера реже вызывают срабатывание Cloudflare
+    # Имитируем реальный браузер Safari на macOS с испанской локалью
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9",
-        "Referer": "https://www.google.com/"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0"
     }
+
+    session = requests.Session()
 
     for region_name, target_url in REGIONS.items():
         print(f"Сбор данных для: {region_name}")
         data_rows = []
         
         try:
-            response = requests.get(target_url, headers=headers, timeout=20)
+            # Сначала заходим на главную страницу для получения cookies
+            session.get("https://www.idealista.com/", headers=headers, timeout=15)
+            
+            # Затем делаем запрос к нужному региону
+            response = session.get(target_url, headers=headers, timeout=20)
             print(f"Статус ответа для {region_name}: {response.status_code}")
             
             if response.status_code == 200:
@@ -153,9 +165,9 @@ def collect_stats():
                         print(f"Ошибка парсинга карточки: {e}")
             else:
                 data_rows.append({
-                    "Название / Адрес": f"⚠️ Защита сайта (код: {response.status_code})",
+                    "Название / Адрес": f"⚠️ Блокировка защиты сайта (код: {response.status_code})",
                     "Цена (€)": 0, "Площадь (м²)": 0, "Комнат": 0, "Цена за м² (€)": 0,
-                    "Статус / Причина отфильтровки": "Cloudflare Block", "Ссылка": target_url
+                    "Статус / Причина отфильтровки": "Требуется обход Cloudflare", "Ссылка": target_url
                 })
 
         except Exception as e:
@@ -163,9 +175,9 @@ def collect_stats():
 
         if not data_rows:
             data_rows.append({
-                "Название / Адрес": "⚠️ Объявления не загрузились",
+                "Название / Адрес": "⚠️ Объявления не найдены",
                 "Цена (€)": 0, "Площадь (м²)": 0, "Комнат": 0, "Цена за м² (€)": 0,
-                "Статус / Причина отфильтровки": "Пустой список", "Ссылка": target_url
+                "Статус / Причина отфильтровки": "Пустой результат", "Ссылка": target_url
             })
 
         df = pd.DataFrame(data_rows)
