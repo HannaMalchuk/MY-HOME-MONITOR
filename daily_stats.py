@@ -79,7 +79,8 @@ def collect_stats():
             data_rows = []
             seen_links = set()
 
-            for page_num in range(1, 4):  # Первые 3 страницы с запасом
+            # Увеличили диапазон до 5 страниц
+            for page_num in range(1, 6):  
                 target_url = f"{base_url}&p={page_num}" if page_num > 1 else base_url
                 try:
                     page.goto(target_url, timeout=40000)
@@ -97,6 +98,11 @@ def collect_stats():
                     articles = page.locator("article").all()
                     if not articles:
                         articles = page.locator("div.re-search-result").all()
+
+                    # Если на странице вообще нет объявлений (дошли до конца каталога), прерываем цикл страниц
+                    if not articles:
+                        print(f"  -> Страница {page_num} пуста, переходим к следующему региону.")
+                        break
 
                     for article in articles:
                         try:
@@ -207,7 +213,7 @@ def send_email(file_path):
     msg['To'] = RECEIVER_EMAIL
     msg['Subject'] = f"🏠 База недвижимости (Playwright) — {datetime.date.today()}"
 
-    body = "Привет! Отчет собран с помощью браузерного движка Playwright. Все блоки прогружены, защиты обойдены."
+    body = "Привет! Отчет собран с помощью браузерного движка Playwright (проверено 5 страниц по каждому региону). Все блоки прогружены, защиты обойдены."
     msg.attach(MIMEText(body, 'plain'))
 
     with open(file_path, "rb") as f:
