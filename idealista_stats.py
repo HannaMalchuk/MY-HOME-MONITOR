@@ -15,7 +15,6 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
 SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 
-# Поисковые URL через открытые индексы агрегаторов в Испании
 REGIONS = {
     "Мадрид (Idealista)": "https://www.nestoria.es/madrid-provincia/comprar-vivienda/max-price-150000/min-size-70/min-rooms-2",
     "Толедо (Idealista)": "https://www.nestoria.es/toledo-provincia/comprar-vivienda/max-price-150000/min-size-70/min-rooms-2",
@@ -80,27 +79,27 @@ def collect_stats():
             try:
                 response = requests.get(target_url, headers=headers, timeout=30)
                 if response.status_code != 200:
-                    print(f"  -> Страница {page_num} недоступна (статус {response.status_code}). Конец каталога.")
                     break
 
                 soup = BeautifulSoup(response.text, "html.parser")
                 
-                # Ищем карточки объектов в открытом индексе агрегатора
-                articles = soup.find_all("div", class_=["normal-result", "property", "advert"])
+                # Универсальный поиск: собираем вообще все карточки и блоки с результатами
+                articles = soup.find_all(["div", "article", "li"], class_=re.compile("result|property|advert|item|card|listing", re.I))
                 if not articles:
-                    articles = soup.find_all("article")
-                if not articles:
-                    articles = soup.find_all("div", class_=re.compile("result|listing", re.I))
+                    articles = soup.find_all("div", attrs={"data-qa": re.compile("result|property", re.I)})
 
                 if not articles:
-                    print(f"  -> На странице {page_num} нет карточек. Сбор завершен.")
                     break
 
                 page_listings_count = 0
 
                 for article in articles:
                     try:
-                        link_elem = article.find("a", href=True)
+                        # Ищем любую ссылку ведущую на объект
+                        link_elem = article.find("a", href=re.compile(r"/inmueble/|/comprar/|/propiedad/|detail", re.I))
+                        if not link_elem:
+                            link_elem = article.find("a", href=True)
+                        
                         if not link_elem:
                             continue
 
@@ -170,7 +169,7 @@ def collect_stats():
                     break
 
                 page_num += 1
-                if page_num > 10:  # Ограничение глубины страниц
+                if page_num > 10:  
                     break
 
             except Exception as e:
