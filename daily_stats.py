@@ -80,7 +80,6 @@ def collect_stats():
     excel_file = f"Real_Estate_Report_Hanna_{datetime.date.today()}.xlsx"
     writer = pd.ExcelWriter(excel_file, engine='openpyxl')
 
-    # Эмуляция полноценного браузера с мобильным / планшетным User-Agent (часто отдает более простой HTML)
     headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -102,8 +101,6 @@ def collect_stats():
                     continue
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Универсальный сбор всех ссылок на объекты недвижимости со страницы
                 all_links = soup.find_all('a', href=True)
                 
                 for link_tag in all_links:
@@ -116,7 +113,6 @@ def collect_stats():
                         continue
                     seen_links.add(full_link)
 
-                    # Берем родительский блок, содержащий весь текст карточки
                     card_container = link_tag.find_parent(['article', 'div', 'section'])
                     card_text = card_container.get_text(" ", strip=True) if card_container else link_tag.get_text(" ", strip=True)
 
@@ -124,7 +120,6 @@ def collect_stats():
                     if len(title) < 5:
                         title = "Квартира / Объект недвижимости"
 
-                    # Извлечение цены через регулярное выражение из текста карточки
                     price = 0.0
                     price_matches = re.findall(r"([\d\.]+)\s*€", card_text)
                     for pm in price_matches:
@@ -138,26 +133,23 @@ def collect_stats():
                     if price == 0:
                         continue
 
-                    # Извлечение площади
                     area = 0.0
                     m_area = re.search(r"(\d+)\s*m[²2]", card_text)
                     if m_area:
                         area = float(m_area.group(1))
 
-                    # Извлечение комнат
                     rooms = 0
                     m_rooms = re.search(r"(\d+)\s*(?:hab|dorm)", card_text, re.IGNORECASE)
                     if m_rooms:
                         rooms = int(m_rooms.group(1))
                     else:
-                        rooms = 2  # Если в ссылке поиска уже отфильтровано от 2 комнат
+                        rooms = 2
 
                     if area > 0 and area < MIN_AREA:
                         continue
                     if area == 0:
-                        area = 75  ртичная оценка для проходящих по фильтру
+                        area = 75
 
-                    # Проверка по черным спискам
                     status = analyze_listing(title, card_text, price, area, rooms)
                     if "Отклонено" in status:
                         continue
@@ -179,7 +171,6 @@ def collect_stats():
             except Exception as e:
                 print(f"Ошибка на странице {page_num}: {e}")
 
-        # Страховка: если по какой-то причине на каком-то регионе совсем пусто, добавляем тестовую строку, чтобы файл не был пустым и не ломал Excel
         if not data_rows:
             data_rows.append({
                 "Название": f"Объект в базе ({region_name})",
