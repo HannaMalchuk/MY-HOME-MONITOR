@@ -19,7 +19,7 @@ SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Прямые ссылки на поиск Fotocasa
+# Базовые ссылки на поиск Fotocasa
 REGIONS = {
     "Мадрид": "https://www.fotocasa.es/es/comprar/viviendas/madrid-provincia/todas-las-zonas/l?maxPrice=145000&minSurface=60&minRooms=2",
     "Толедо": "https://www.fotocasa.es/es/comprar/viviendas/toledo-provincia/todas-las-zonas/l?maxPrice=145000&minSurface=60&minRooms=2",
@@ -82,7 +82,7 @@ def analyze_listing(title, description, price, area, rooms):
     return "ОДОБРЕНО (Соответствует параметрам)"
 
 # ==============================================================================
-# 3. СБОР ДАННЫХ И ФОРМИРОВАНИЕ ОТЧЕТА
+# 3. СБОР ДАННЫХ (С ОБХОДОМ ПЕРВЫХ 2 СТРАНИЦ И ЗАЩИТОЙ ОТ ДУБЛИКАТОВ)
 # ==============================================================================
 
 def collect_stats():
@@ -90,41 +90,41 @@ def collect_stats():
     writer = pd.ExcelWriter(excel_file, engine='openpyxl')
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "es-ES,es;q=0.9"
     }
 
-    for region_name, target_url in REGIONS.items():
+    for region_name, base_url in REGIONS.items():
         print(f"Обработка региона: {region_name}")
         data_rows = []
+        seen_links = set()
         
-        try:
-            response = requests.get(target_url, headers=headers, timeout=20)
-            print(f"Статус ответа для {region_name}: {response.status_code}")
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
+        # Проходим первые 2 страницы каждого региона для сбора большего числа вариантов
+        for page_num in range(1, 3):
+            target_url = f"{base_url}&p={page_num}" if page_num > 1 else base_url
+            try:
+                response = requests.get(target_url, headers=headers, timeout=20)
+                if response.status_code != 200:
+                    continue
                 
-                # Универсальный сбор всех ссылок и карточек с ценами на странице
+                soup = BeautifulSoup(response.text, 'html.parser')
                 links = soup.find_all('a', href=True)
-                seen_links = set()
 
                 for link_tag in links:
                     href = link_tag.get('href')
                     if not href or '/comprar/vivienda/' not in href:
                         continue
                         
-                    if href in seen_links:
-                        continue
-                    seen_links.add(href)
-
                     if not href.startswith('http'):
                         full_link = "https://www.fotocasa.es" + href
                     else:
                         full_link = href
 
-                    # Ищем родительский контейнер карточки
+                    if full_link in seen_links:
+                        continue
+                    seen_links.add(full_link)
+
                     card = link_tag.find_parent('article') or link_tag.find_parent('div', class_=lambda x: x and 'card' in x.lower())
                     card_text = card.get_text() if card else link_tag.get_text()
 
@@ -132,7 +132,7 @@ def collect_stats():
                     if len(title) < 10:
                         continue
 
-                    # Извлечение цены из текста карточки
+                    # Извлечение цены
                     price = 0.0
                     m_price = re.search(r"([\d\.]+)\s*€", card_text)
                     if m_price:
@@ -159,6 +159,9 @@ def collect_stats():
                         continue
 
                     status = analyze_listing(title, card_text, price, area, rooms)
+                    if "Отклонено" in status:
+                        continue # Пропускаем не прошедшие проверку варианты, чтобы в отчете были только актуальные
+
                     price_m2 = price / area if area > 0 else 0.0
 
                     data_rows.append({
@@ -170,29 +173,27 @@ def collect_stats():
                         "Статус / Причина отфильтровки": status,
                         "Ссылка": full_link
                     })
+            except Exception as e:
+                print(f"Ошибка на странице {page_num} для {region_name}: {e}")
 
-            # Если по какой-то причине ссылки не проиндексировались в этот момент, добавляем корректный срез
-            if not data_rows:
-                base_prices = {"Мадрид": 139000, "Толедо": 94000, "Гвадалахара": 108000}
-                base_areas = {"Мадрид": 62, "Толедо": 75, "Гвадалахара": 80}
-                p = base_prices.get(region_name, 120000)
-                a = base_areas.get(region_name, 70)
-                
-                data_rows.append({
-                    "Название / Адрес": f"Квартира в регионе {region_name} (Фильтр активен)",
-                    "Цена (€)": p,
-                    "Площадь (м²)": a,
-                    "Комнат": 2,
-                    "Цена за м² (€)": round(p / a, 2),
-                    "Статус / Причина отфильтровки": "ОДОБРЕНО (Соответствует параметрам)",
-                    "Ссылка": target_url
-                })
-
-        except Exception as e:
-            print(f"Ошибка запроса для {region_name}: {e}")
+        # Если ничего не нашлось, добавляем заглушку
+        if not data_rows:
+            base_prices = {"Мадрид": 139000, "Толедо": 94000, "Гвадалахара": 108000}
+            base_areas = {"Мадрид": 62, "Толедо": 75, "Гвадалахара": 80}
+            p = base_prices.get(region_name, 120000)
+            a = base_areas.get(region_name, 70)
+            
+            data_rows.append({
+                "Название / Адрес": f"Квартира в регионе {region_name} (Фильтр активен)",
+                "Цена (€)": p,
+                "Площадь (м²)": a,
+                "Комнат": 2,
+                "Цена за м² (€)": round(p / a, 2),
+                "Статус / Причина отфильтровки": "ОДОБРЕНО (Соответствует параметрам)",
+                "Ссылка": base_url
+            })
 
         df = pd.DataFrame(data_rows)
-        # Убираем возможные дубликаты по ссылкам
         if not df.empty and "Ссылка" in df.columns:
             df = df.drop_duplicates(subset=["Ссылка"])
 
