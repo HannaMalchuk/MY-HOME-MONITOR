@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import datetime
@@ -8,7 +9,7 @@ from email.mime.application import MIMEApplication
 
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 # ==============================================================================
 # 1. НАСТРОЙКИ
@@ -81,64 +82,75 @@ def analyze_listing(title, description, price, area, rooms):
     return "ОДОБРЕНО (Отправлено в Telegram)"
 
 # ==============================================================================
-# 3. СБОР ДАННЫХ ЧЕРЕЗ СИМУЛЯЦИЮ СТРАНИЦЫ С УЛУЧШЕННЫМИ ЗАГОЛОВКАМИ
+# 3. СБОР ЧЕРЕЗ PLAYWRIGHT С ПЕРЕХОДОМ ЗАЩИТЫ
 # ==============================================================================
 
-def collect_stats():
+async def collect_stats():
     excel_file = f"Idealista_Daily_Report_{datetime.date.today()}.xlsx"
     writer = pd.ExcelWriter(excel_file, engine='openpyxl')
 
-    # Имитируем реальный браузер Safari на macOS с испанской локалью
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0"
-    }
-
-    session = requests.Session()
-
-    for region_name, target_url in REGIONS.items():
-        print(f"Сбор данных для: {region_name}")
-        data_rows = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage"
+            ]
+        )
         
-        try:
-            # Сначала заходим на главную страницу для получения cookies
-            session.get("https://www.idealista.com/", headers=headers, timeout=15)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="es-ES"
+        )
+        
+        page = await context.new_page()
+
+        for region_name, target_url in REGIONS.items():
+            print(f"Сбор данных для: {region_name}")
+            data_rows = []
             
-            # Затем делаем запрос к нужному региону
-            response = session.get(target_url, headers=headers, timeout=20)
-            print(f"Статус ответа для {region_name}: {response.status_code}")
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                cards = soup.select("article.item")
+            try:
+                # Переходим на главную, чтобы получить легитимные куки Cloudflare
+                await page.goto("https://www.idealista.com/", timeout=45000)
+                await page.wait_for_timeout(3000)
+                
+                # Теперь переходим на страницу региона
+                await page.goto(target_url, timeout=45000)
+                
+                # Даем время на прохождение скриптов защиты (ждем появления карточек или заголовка)
+                try:
+                    await page.wait_for_selector("article.item", timeout=12000)
+                except:
+                    # Если сработала защита, ждем подольше и имитируем активность
+                    print("Ожидание прохождения Cloudflare...")
+                    await page.wait_for_timeout(8000)
+                    await page.mouse.move(500, 500)
+                    await page.evaluate("window.scrollBy(0, 600)")
+                    await page.wait_for_timeout(5000)
+
+                cards = await page.query_selector_all("article.item")
                 print(f"Найдено карточек: {len(cards)}")
 
                 for card in cards:
                     try:
-                        title_el = card.select_one(".item-link")
+                        title_el = await card.query_selector(".item-link")
                         if not title_el:
                             continue
-                        title = title_el.get_text(strip=True)
-                        link = title_el.get("href")
+                        title = (await title_el.inner_text()).strip()
+                        link = await title_el.get_attribute("href")
                         if link and not link.startswith("http"):
                             link = "https://www.idealista.com" + link
 
-                        price_el = card.select_one(".item-price")
-                        price = float(re.sub(r"[^\d]", "", price_el.get_text())) if price_el else 0.0
+                        price_el = await card.query_selector(".item-price")
+                        price = float(re.sub(r"[^\d]", "", await price_el.inner_text())) if price_el else 0.0
 
-                        details = card.select(".item-detail")
+                        details = await card.query_selector_all(".item-detail")
                         area, rooms = 0.0, 0
                         for detail in details:
-                            txt = detail.get_text()
+                            txt = await detail.inner_text()
                             if "m²" in txt:
                                 m = re.search(r"(\d+)", txt.replace(".", ""))
                                 if m: area = float(m.group(1))
@@ -146,8 +158,8 @@ def collect_stats():
                                 m = re.search(r"(\d+)", txt)
                                 if m: rooms = int(m.group(1))
 
-                        desc_el = card.select_one(".item-description")
-                        description = desc_el.get_text(strip=True) if desc_el else ""
+                        desc_el = await card.query_selector(".item-description")
+                        description = await desc_el.inner_text() if desc_el else ""
 
                         status = analyze_listing(title, description, price, area, rooms)
                         price_m2 = price / area if area > 0 else 0.0
@@ -162,37 +174,33 @@ def collect_stats():
                             "Ссылка": link
                         })
                     except Exception as e:
-                        print(f"Ошибка парсинга карточки: {e}")
-            else:
+                        print(f"Ошибка чтения карточки: {e}")
+
+            except Exception as e:
+                print(f"Ошибка загрузки {region_name}: {e}")
+
+            if not data_rows:
                 data_rows.append({
-                    "Название / Адрес": f"⚠️ Блокировка защиты сайта (код: {response.status_code})",
+                    "Название / Адрес": "⚠️ Требуется интерактивное прохождение капчи Cloudflare",
                     "Цена (€)": 0, "Площадь (м²)": 0, "Комнат": 0, "Цена за м² (€)": 0,
-                    "Статус / Причина отфильтровки": "Требуется обход Cloudflare", "Ссылка": target_url
+                    "Статус / Причина отфильтровки": "Заблокировано", "Ссылка": target_url
                 })
 
-        except Exception as e:
-            print(f"Ошибка запроса {region_name}: {e}")
+            df = pd.DataFrame(data_rows)
+            
+            if not df.empty and df.iloc[0]["Цена (€)"] > 0:
+                avg_price_m2 = df[df["Цена (€)"] > 0]["Цена за м² (€)"].mean()
+                summary_row = pd.DataFrame([{
+                    "Название / Адрес": "СРЕДНЯЯ ЦЕНА ЗА М² ЗА ДЕНЬ:",
+                    "Цена (€)": None, "Площадь (м²)": None, "Комнат": None,
+                    "Цена за м² (€)": round(avg_price_m2, 2),
+                    "Статус / Причина отфильтровки": "-", "Ссылка": "-"
+                }])
+                df = pd.concat([df, summary_row], ignore_index=True)
 
-        if not data_rows:
-            data_rows.append({
-                "Название / Адрес": "⚠️ Объявления не найдены",
-                "Цена (€)": 0, "Площадь (м²)": 0, "Комнат": 0, "Цена за м² (€)": 0,
-                "Статус / Причина отфильтровки": "Пустой результат", "Ссылка": target_url
-            })
+            df.to_excel(writer, sheet_name=region_name, index=False)
 
-        df = pd.DataFrame(data_rows)
-        
-        if not df.empty and df.iloc[0]["Цена (€)"] > 0:
-            avg_price_m2 = df[df["Цена (€)"] > 0]["Цена за м² (€)"].mean()
-            summary_row = pd.DataFrame([{
-                "Название / Адрес": "СРЕДНЯЯ ЦЕНА ЗА М² ЗА ДЕНЬ:",
-                "Цена (€)": None, "Площадь (м²)": None, "Комнат": None,
-                "Цена за м² (€)": round(avg_price_m2, 2),
-                "Статус / Причина отфильтровки": "-", "Ссылка": "-"
-            }])
-            df = pd.concat([df, summary_row], ignore_index=True)
-
-        df.to_excel(writer, sheet_name=region_name, index=False)
+        await browser.close()
     
     writer.close()
     return excel_file
@@ -222,5 +230,5 @@ def send_email(file_path):
     print("Отчёт успешно отправлен на email!")
 
 if __name__ == "__main__":
-    report_file = collect_stats()
+    report_file = asyncio.run(collect_stats())
     send_email(report_file)
