@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 # ==============================================================================
-# 1. НАСТРОЙКИ И ПАРАМЕТРЫ (Fotocasa — без блокировок Cloudflare)
+# 1. НАСТРОЙКИ И ПАРАМЕТРЫ
 # ==============================================================================
 
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
@@ -19,7 +19,7 @@ SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Ссылки на поиск Fotocasa по регионам с нужными параметрами (цена до 145k, от 60м², от 2 комнат)
+# Ссылки на поиск Fotocasa по регионам (цена до 145k, от 60м², от 2 комнат)
 REGIONS = {
     "Мадрид": "https://www.fotocasa.es/es/comprar/viviendas/madrid-provincia/todas-las-zonas/l?maxPrice=145000&minSurface=60&minRooms=2",
     "Толедо": "https://www.fotocasa.es/es/comprar/viviendas/toledo-provincia/todas-las-zonas/l?maxPrice=145000&minSurface=60&minRooms=2",
@@ -82,7 +82,7 @@ def analyze_listing(title, description, price, area, rooms):
     return "ОДОБРЕНО (Соответствует параметрам)"
 
 # ==============================================================================
-# 3. СБОР ДАННЫХ С FOTOCASA
+# 3. СБОР ДАННЫХ И ФОРМИРОВАНИЕ ОТЧЕТА
 # ==============================================================================
 
 def collect_stats():
@@ -105,40 +105,54 @@ def collect_stats():
             
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
-                # Селекторы карточек на Fotocasa
-                cards = soup.select("article.re-Card") or soup.select(".re-search-result-card")
-                print(f"Найдено карточек: {len(cards)}")
+                
+                # Ищем блоки карточек по универсальным классам Fotocasa
+                cards = soup.find_all(['article', 'div'], class_=lambda x: x and ('re-Card' in x or 'card' in x.lower()))
+                print(f"Найдено элементов карточек: {len(cards)}")
 
                 for card in cards:
                     try:
-                        title_el = card.select_one(".re-Card-title") or card.select_one("a.re-Card-link")
+                        title_el = card.find(['a', 'span', 'h3'], class_=lambda x: x and ('title' in x.lower() or 'link' in x.lower()))
+                        if not title_el:
+                            title_el = card.find('a')
+                        
                         if not title_el:
                             continue
+                            
                         title = title_el.get_text(strip=True)
-                        link = title_el.get("href") if title_el.name == "a" else card.select_one("a")
-                        if link and hasattr(link, "get"):
-                            link = link.get("href")
+                        if len(title) < 5:
+                            continue
+
+                        link = title_el.get('href') if title_el.name == 'a' else None
+                        if not link:
+                            parent_a = card.find('a', href=True)
+                            link = parent_a.get('href') if parent_a else target_url
+
                         if link and not link.startswith("http"):
                             link = "https://www.fotocasa.es" + link
 
-                        price_el = card.select_one(".re-Card-price")
-                        price = float(re.sub(r"[^\d]", "", price_el.get_text())) if price_el else 0.0
+                        price_el = card.find(class_=lambda x: x and 'price' in x.lower())
+                        price_text = price_el.get_text(strip=True) if price_el else "0"
+                        price = float(re.sub(r"[^\d]", "", price_text)) if re.sub(r"[^\d]", "", price_text) else 0.0
 
-                        # Извлечение характеристик (метры, комнаты)
-                        features = card.select(".re-Card-features-item")
+                        if price == 0 or price > MAX_PRICE:
+                            continue
+
+                        text_content = card.get_text()
                         area, rooms = 0.0, 0
-                        for feat in features:
-                            txt = feat.get_text()
-                            if "m²" in txt:
-                                m = re.search(r"(\d+)", txt.replace(".", ""))
-                                if m: area = float(m.group(1))
-                            elif "hab" in txt or "dorm" in txt:
-                                m = re.search(r"(\d+)", txt)
-                                if m: rooms = int(m.group(1))
+                        
+                        m_area = re.search(r"(\d+)\s*m[²2]", text_content)
+                        if m_area:
+                            area = float(m_area.group(1))
 
-                        description = title # На превью карточки заголовок заменяет краткое описание
+                        m_rooms = re.search(r"(\d+)\s*(?:hab|dorm)", text_content, re.IGNORECASE)
+                        if m_rooms:
+                            rooms = int(m_rooms.group(1))
 
-                        status = analyze_listing(title, description, price, area, rooms)
+                        if area < MIN_AREA or rooms < MIN_ROOMS:
+                            continue
+
+                        status = analyze_listing(title, title, price, area, rooms)
                         price_m2 = price / area if area > 0 else 0.0
 
                         data_rows.append({
@@ -148,25 +162,19 @@ def collect_stats():
                             "Комнат": rooms,
                             "Цена за м² (€)": round(price_m2, 2),
                             "Статус / Причина отфильтровки": status,
-                            "Ссылка": link or target_url
+                            "Ссылка": link
                         })
                     except Exception as e:
-                        print(f"Ошибка парсинга элемента: {e}")
+                        print(f"Ошибка парсинга отдельной карточки: {e}")
 
             if not data_rows:
-                # Резервная генерация со статистическими данными, если структура разметки изменилась
-                base_prices = {"Мадрид": 138000, "Толедо": 92000, "Гвадалахара": 105000}
-                base_areas = {"Мадрид": 62, "Толедо": 78, "Гвадалахара": 82}
-                p = base_prices.get(region_name, 120000)
-                a = base_areas.get(region_name, 70)
-                
                 data_rows.append({
-                    "Название / Адрес": f"Объект в базе Fotocasa ({region_name})",
-                    "Цена (€)": p,
-                    "Площадь (м²)": a,
-                    "Комнат": 2,
-                    "Цена за м² (€)": round(p / a, 2),
-                    "Статус / Причина отфильтровки": "ОДОБРЕНО (Соответствует параметрам)",
+                    "Название / Адрес": f"⚠️ Требуется уточнение селекторов для {region_name}",
+                    "Цена (€)": 0,
+                    "Площадь (м²)": 0,
+                    "Комнат": 0,
+                    "Цена за м² (€)": 0,
+                    "Статус / Причина отфильтровки": "Нулевой результат парсинга",
                     "Ссылка": target_url
                 })
 
