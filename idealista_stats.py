@@ -20,11 +20,11 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
 SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 
-# Ссылки Idealista под твои параметры (до 150k€, от 70м², от 2 комнат)
+# Базовые региональные ссылки Idealista без ошибочных параметров в строке
 REGIONS = {
-    "Мадрид (Idealista)": "https://www.idealista.com/venta-viviendas/madrid-provincia/con-precio-hasta_150000,tamano-mas-de_70,habitaciones-mas-de_2/",
-    "Толедо (Idealista)": "https://www.idealista.com/venta-viviendas/toledo-provincia/con-precio-hasta_150000,tamano-mas-de_70,habitaciones-mas-de_2/",
-    "Гвадалахара (Idealista)": "https://www.idealista.com/venta-viviendas/guadalajara-provincia/con-precio-hasta_150000,tamano-mas-de_70,habitaciones-mas-de_2/"
+    "Мадрид (Idealista)": "https://www.idealista.com/venta-viviendas/madrid-provincia/",
+    "Толедо (Idealista)": "https://www.idealista.com/venta-viviendas/toledo-provincia/",
+    "Гвадалахара (Idealista)": "https://www.idealista.com/venta-viviendas/guadalajara-provincia/"
 }
 
 MAX_PRICE = 150000.0
@@ -84,7 +84,7 @@ def collect_stats():
 
             page_num = 1
             while True:
-                # На Idealista пагинация идет через /pagina-X.htm или параметр
+                # Пагинация на Idealista через /pagina-X.htm
                 if page_num == 1:
                     target_url = base_url
                 else:
@@ -92,10 +92,9 @@ def collect_stats():
 
                 try:
                     page.goto(target_url, timeout=40000)
-                    # Рандомная пауза для обхода защиты Idealista (Datadome)
                     time.sleep(random.uniform(3.5, 6.5))
 
-                    # Принимаем куки на Idealista, если появляется баннер
+                    # Принимаем куки, если появляется баннер
                     try:
                         cookie_btn = page.locator("button#didomi-notice-agree-button, button.didomi-continue-without-agreeing")
                         if cookie_btn.count() > 0:
@@ -103,10 +102,10 @@ def collect_stats():
                     except:
                         pass
 
-                    # Ищем карточки на Idealista
+                    # Актуальные селекторы карточек на Idealista
                     articles = page.locator("article.item").all()
                     if not articles:
-                        articles = page.locator("div.item-multimedia").all()
+                        articles = page.locator("div.item-info-container").all()
 
                     if not articles:
                         print(f"  -> Страница {page_num} пуста или достигнут конец выдачи Idealista.")
@@ -189,8 +188,7 @@ def collect_stats():
                         break
 
                     page_num += 1
-                    # Ограничим максимум 10 страницами на регион для стабильности
-                    if page_num > 10:
+                    if page_num > 10: # Ограничение в 10 страниц для безопасности
                         break
 
                 except Exception as e:
@@ -215,7 +213,7 @@ def collect_stats():
                 df = df.sort_values(by="Дата публикации", ascending=False)
 
             df_to_save = df.drop(columns=["_highlight"]) if "_highlight" in df.columns else df
-            sheet_clean_name = region_name[:31] # Excel ограничивает имена вкладок 31 символом
+            sheet_clean_name = region_name[:31]
             df_to_save.to_excel(writer, sheet_name=sheet_clean_name, index=False)
             
             worksheet = writer.sheets[sheet_clean_name]
