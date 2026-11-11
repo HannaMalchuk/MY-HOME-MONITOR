@@ -3,7 +3,7 @@ name: Daily Real Estate Report
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 8 * * *' # Запуск каждый день в 8:00 утра (можешь изменить при желании)
+    - cron: '0 8 * * *'
 
 jobs:
   build-and-send-report:
@@ -23,7 +23,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pandas openpyxl playwright
           playwright install chromium
-          playwright install-deps chromium
 
       - name: Run Daily Report Generator
         env:
