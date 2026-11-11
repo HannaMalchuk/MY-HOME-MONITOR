@@ -31,13 +31,13 @@ MAX_PRICE = 150000.0
 MIN_AREA = 70.0
 MIN_ROOMS = 2
 
-# Чёрный список неблагополучных зон и отдаленных мест
+# Скорректированный черный список (исключены пересечения с названиями улиц)
 FORBIDDEN_LOCATIONS = [
-    "chozas de canales", "chozas", "lominchar", "recas", "seseña", "sesena", "quiñon", "quiñón", 
+    "chozas de canales", "lominchar", "recas", "seseña", "sesena", "quiñon", "quiñón", 
     "yuncos", "yeles", "pantoja", "esquivias", "numancia de la sagra", "borox", "cabañas de la sagra",
-    "cobeja", "magan", "magán", "villaluenga de la sagra", "talavera de la reina", "consuegra",
-    "valdemingomez", "valdemingómez", "cañada real", "las barranquillas", "parla", "alhondiga", "alhóndiga",
-    "el gorronal", "gorronal", "azuqueca de henares", "marchamalo", "yebes", "sigüenza", "molina de aragón"
+    "cobeja", "villaluenga de la sagra", "talavera de la reina", "consuegra",
+    "valdemingomez", "valdemingómez", "cañada real", "las barranquillas", "parla sur", 
+    "el gorronal", "yebes", "sigüenza", "molina de aragón"
 ]
 
 LEGAL_RISK_WORDS = [
@@ -48,7 +48,7 @@ LEGAL_RISK_WORDS = [
 ]
 
 # Ключевые слова для подсветки красным цветом
-HIGHLIGHT_WORDS = ["terraza", "terrace", "piscina", "pool", "patio", "jardín", "jardin"]
+HIGHLIGHT_WORDS = ["terraza", "terrace", "piscina", "pool", "patio", "jardín", "jardin", "ascensor"]
 
 # ==============================================================================
 # 2. ФИЛЬТРАЦИЯ И ПРОВЕРКА ОБЪЕКТОВ
@@ -93,8 +93,8 @@ def collect_stats():
         data_rows = []
         seen_links = set()
         
-        # Сканируем первые 5 страниц, чтобы собрать максимальную базу активных объектов
-        for page_num in range(1, 6):
+        # Увеличиваем сбор до 10 страниц для максимального охвата базы
+        for page_num in range(1, 11):
             target_url = f"{base_url}&p={page_num}" if page_num > 1 else base_url
             try:
                 response = requests.get(target_url, headers=headers, timeout=20)
@@ -147,17 +147,15 @@ def collect_stats():
                     if area < MIN_AREA or rooms < MIN_ROOMS:
                         continue
 
-                    # Фильтрация по черным спискам и параметрам
+                    # Проверка по критериям
                     status = analyze_listing(title, card_text, price, area, rooms)
                     if "Отклонено" in status:
                         continue
 
-                    # Дата публикации (если на сайте указана свежая, берем ее, иначе стандартная дата для сортировки)
                     pub_date = str(datetime.date.today())
                     if "hace" in card_text.lower() or "ayer" in card_text.lower():
                         pub_date = str(datetime.date.today() - datetime.timedelta(days=1))
                     
-                    # Телефон для связи
                     phone = "Контакт на сайте"
                     m_phone = re.search(r"(\+34[\s\d]{9,})", card_text)
                     if m_phone:
@@ -182,14 +180,12 @@ def collect_stats():
         if not df.empty and "Ссылка на страницу объекта" in df.columns:
             df = df.drop_duplicates(subset=["Ссылка на страницу объекта"])
 
-        # Сортировка всей базы от новых к старым
         if not df.empty and "Дата публикации" in df.columns:
             df = df.sort_values(by="Дата публикации", ascending=False)
 
         df_to_save = df.drop(columns=["_highlight"]) if "_highlight" in df.columns else df
         df_to_save.to_excel(writer, sheet_name=region_name, index=False)
         
-        # Подсветка строк с террасой, бассейном или патио мягким красным цветом
         worksheet = writer.sheets[region_name]
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
@@ -212,7 +208,7 @@ def send_email(file_path):
     msg['To'] = RECEIVER_EMAIL
     msg['Subject'] = f"🏠 Полная база недвижимости для Ханны — {datetime.date.today()}"
 
-    body = "Привет! Во вложении твой полный аналитический отчёт по недвижимости (Мадрид, Толедо до 70км, Гвадалахара до 70км).\n\nСобрана вся актуальная база с сайта по твоим критериям (цена до 150к, от 70м², от 2 комнат), отсортированная от новых к старым. Объекты с террасой, бассейном или патио выделены мягким красным цветом."
+    body = "Привет! Во вложении твой полный аналитический отчёт по недвижимости (Мадрид, Толедо до 70км, Гвадалахара до 70км).\n\nЧерные списки скорректированы, глубина сбора увеличена до 10 страниц. Объекты с террасой, бассейном, патио или лифтом подсвечены красным."
     msg.attach(MIMEText(body, 'plain'))
 
     with open(file_path, "rb") as f:
