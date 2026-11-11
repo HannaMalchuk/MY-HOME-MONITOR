@@ -21,9 +21,9 @@ RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 REGIONS = {
-    "Мадрид и область": "https://www.idealista.com/venta-viviendas/madrid-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
-    "Толедо и область": "https://www.idealista.com/venta-viviendas/toledo-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
-    "Гвадалахара и область": "https://www.idealista.com/venta-viviendas/guadalajara-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/"
+    "Мадрид": "https://www.idealista.com/venta-viviendas/madrid-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
+    "Толедо": "https://www.idealista.com/venta-viviendas/toledo-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/",
+    "Гвадалахара": "https://www.idealista.com/venta-viviendas/guadalajara-provincia/con-precio-hasta_145000,metros-cuadrados-mas-de_60,habitaciones-mas-de_2/"
 }
 
 MAX_PRICE = 145000.0
@@ -52,17 +52,14 @@ LEGAL_RISK_WORDS = [
 def analyze_listing(title, description, price, area, rooms):
     full_text = f"{title.lower()} {description.lower()}"
     
-    # Check 1: Forbidden Location
     for loc in FORBIDDEN_LOCATIONS:
         if loc in full_text:
             return f"Отклонено: Опасная/неблагополучная зона ({loc.title()})"
             
-    # Check 2: Legal Risk / Okupas
     for risk in LEGAL_RISK_WORDS:
         if risk in full_text:
             return f"Отклонено: Юридический риск / Okupas ({risk})"
             
-    # Check 3: Specs
     if price > MAX_PRICE:
         return f"Отклонено: Превышена цена ({price:,.0f} € > {MAX_PRICE:,.0f} €)"
     if area < MIN_AREA:
@@ -70,7 +67,6 @@ def analyze_listing(title, description, price, area, rooms):
     if rooms < MIN_ROOMS:
         return f"Отклонено: Мало комнат ({rooms} < {MIN_ROOMS})"
 
-    # Check 4: Gemini AI
     if GEMINI_API_KEY:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -95,8 +91,11 @@ async def collect_stats():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+        # Настройка полноценного браузера с реалистичными заголовками
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="es-ES"
         )
         page = await context.new_page()
 
@@ -106,8 +105,14 @@ async def collect_stats():
             
             try:
                 await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(5000)
+                
+                # Прокручиваем страницу для подгрузки элементов
+                await page.evaluate("window.scrollBy(0, 1000)")
+                await page.wait_for_timeout(2000)
+
                 cards = await page.query_selector_all("article.item")
+                print(f"Найдено карточек на странице {region_name}: {len(cards)}")
 
                 for card in cards:
                     try:
@@ -119,11 +124,9 @@ async def collect_stats():
                         if link and not link.startswith("http"):
                             link = "https://www.idealista.com" + link
 
-                        # Price
                         price_el = await card.query_selector(".item-price")
                         price = float(re.sub(r"[^\d]", "", await price_el.inner_text())) if price_el else 0.0
 
-                        # Specs
                         details = await card.query_selector_all(".item-detail")
                         area, rooms = 0.0, 0
                         for detail in details:
@@ -151,16 +154,27 @@ async def collect_stats():
                             "Ссылка": link
                         })
                     except Exception as e:
-                        print(f"Ошибка элемента: {e}")
+                        print(f"Ошибка чтения карточки: {e}")
 
             except Exception as e:
-                print(f"Ошибка загрузки страницы: {e}")
+                print(f"Ошибка загрузки страницы {region_name}: {e}")
+
+            # Если карточки не нашлись (блокировка сайта), создаем пустую строку-заглушку с пояснением
+            if not data_rows:
+                data_rows.append({
+                    "Название / Адрес": "⚠️ Сайт временно заблокировал доступ или не отдал карточки (защита от ботов)",
+                    "Цена (€)": 0,
+                    "Площадь (м²)": 0,
+                    "Комнат": 0,
+                    "Цена за м² (€)": 0,
+                    "Статус / Причина отфильтровки": "Проверьте логи GitHub Actions",
+                    "Ссылка": target_url
+                })
 
             df = pd.DataFrame(data_rows)
             
-            # Если данные есть, рассчитываем среднюю цену за м2
-            if not df.empty:
-                avg_price_m2 = df["Цена за м² (€)"].mean()
+            if not df.empty and df.iloc[0]["Цена (€)"] > 0:
+                avg_price_m2 = df[df["Цена (€)"] > 0]["Цена за м² (€)"].mean()
                 summary_row = pd.DataFrame([{
                     "Название / Адрес": "СРЕДНЯЯ ЦЕНА ЗА М² ЗА ДЕНЬ:",
                     "Цена (€)": None,
@@ -172,8 +186,7 @@ async def collect_stats():
                 }])
                 df = pd.concat([df, summary_row], ignore_index=True)
 
-            sheet_name = region_name.split()[0] # "Мадрид", "Толедо", "Гвадалахара"
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            df.to_excel(writer, sheet_name=region_name, index=False)
 
         await browser.close()
     
