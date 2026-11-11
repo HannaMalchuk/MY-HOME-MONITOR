@@ -20,7 +20,7 @@ SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Ссылки на поиск Fotocasa (квартиры, дома, дуплексы, атико, шале до 150к, от 70м², от 2 комнат)
+# Ссылки на поиск Fotocasa (цена до 150к, от 70м², от 2 комнат)
 REGIONS = {
     "Мадрид": "https://www.fotocasa.es/es/comprar/viviendas/madrid-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2",
     "Толедо (до 70км)": "https://www.fotocasa.es/es/comprar/viviendas/toledo-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2",
@@ -31,7 +31,7 @@ MAX_PRICE = 150000.0
 MIN_AREA = 70.0
 MIN_ROOMS = 2
 
-# Чёрный список неблагополучных и опасных зон / отдаленных районов
+# Чёрный список неблагополучных зон и отдаленных мест
 FORBIDDEN_LOCATIONS = [
     "chozas de canales", "chozas", "lominchar", "recas", "seseña", "sesena", "quiñon", "quiñón", 
     "yuncos", "yeles", "pantoja", "esquivias", "numancia de la sagra", "borox", "cabañas de la sagra",
@@ -54,7 +54,7 @@ HIGHLIGHT_WORDS = ["terraza", "terrace", "piscina", "pool", "patio", "jardín", 
 # 2. ФИЛЬТРАЦИЯ И ПРОВЕРКА ОБЪЕКТОВ
 # ==============================================================================
 
-def analyze_listing(title, description, price, area, rooms, region_name):
+def analyze_listing(title, description, price, area, rooms):
     full_text = f"{title.lower()} {description.lower()}"
     
     for loc in FORBIDDEN_LOCATIONS:
@@ -72,22 +72,10 @@ def analyze_listing(title, description, price, area, rooms, region_name):
     if rooms < MIN_ROOMS:
         return f"Отклонено: Мало комнат ({rooms} < 2)"
 
-    if GEMINI_API_KEY:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-            prompt = f"Проанализируй объект недвижимости: '{title}'. Описание: '{description}'. Подходит ли для безопасного проживания семьи с ребенком, без оккупасов и обременений? Ответь JSON: {{\"safe\": true/false, \"reason\": \"кратко\"}}"
-            resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=5)
-            if resp.status_code == 200:
-                text = resp.json()['candidates'][0]['content']['parts'][0]['text']
-                if '"safe": false' in text.lower():
-                    return "Отклонено AI: Небезопасно или рискованно"
-        except Exception:
-            pass
-
     return "ОДОБРЕНО"
 
 # ==============================================================================
-# 3. СБОР И СОРТИРОВКА ДАННЫХ
+# 3. СБОР ВСЕЙ БАЗЫ И СОРТИРОВКА
 # ==============================================================================
 
 def collect_stats():
@@ -96,7 +84,7 @@ def collect_stats():
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "es-ES,es;q=0.9"
     }
 
@@ -105,7 +93,8 @@ def collect_stats():
         data_rows = []
         seen_links = set()
         
-        for page_num in range(1, 4):
+        # Сканируем первые 5 страниц, чтобы собрать максимальную базу активных объектов
+        for page_num in range(1, 6):
             target_url = f"{base_url}&p={page_num}" if page_num > 1 else base_url
             try:
                 response = requests.get(target_url, headers=headers, timeout=20)
@@ -129,7 +118,7 @@ def collect_stats():
                     card_text = card.get_text() if card else link_tag.get_text()
 
                     title = link_tag.get_text(strip=True)
-                    if len(title) < 8:
+                    if len(title) < 5:
                         continue
 
                     # Цена
@@ -158,17 +147,18 @@ def collect_stats():
                     if area < MIN_AREA or rooms < MIN_ROOMS:
                         continue
 
-                    status = analyze_listing(title, card_text, price, area, rooms, region_name)
+                    # Фильтрация по черным спискам и параметрам
+                    status = analyze_listing(title, card_text, price, area, rooms)
                     if "Отклонено" in status:
                         continue
 
+                    # Дата публикации (если на сайте указана свежая, берем ее, иначе стандартная дата для сортировки)
                     pub_date = str(datetime.date.today())
-                    if "ayer" in card_text.lower():
+                    if "hace" in card_text.lower() or "ayer" in card_text.lower():
                         pub_date = str(datetime.date.today() - datetime.timedelta(days=1))
-                    elif "hoy" in card_text.lower():
-                        pub_date = str(datetime.date.today())
-
-                    phone = "Через сайт Fotocasa"
+                    
+                    # Телефон для связи
+                    phone = "Контакт на сайте"
                     m_phone = re.search(r"(\+34[\s\d]{9,})", card_text)
                     if m_phone:
                         phone = m_phone.group(1).strip()
@@ -179,7 +169,7 @@ def collect_stats():
                         "Название": title,
                         "Стоимость (€)": price,
                         "Метры (м²)": area,
-                        "Описание": card_text[:180] + "...",
+                        "Описание": card_text[:200] + "...",
                         "Дата публикации": pub_date,
                         "Телефон для связи": phone,
                         "Ссылка на страницу объекта": full_link,
@@ -188,28 +178,18 @@ def collect_stats():
             except Exception as e:
                 print(f"Ошибка на странице {page_num}: {e}")
 
-        if not data_rows:
-            data_rows.append({
-                "Название": f"Премиум апартаменты/дом в регионе {region_name}",
-                "Стоимость (€)": 145000,
-                "Метры (м²)": 75,
-                "Описание": "Просторная квартира, подходит под все параметры поиска, бассейн и терраса.",
-                "Дата публикации": str(datetime.date.today()),
-                "Телефон для связи": "+34 600 000 000",
-                "Ссылка на страницу объекта": base_url,
-                "_highlight": True
-            })
-
         df = pd.DataFrame(data_rows)
         if not df.empty and "Ссылка на страницу объекта" in df.columns:
             df = df.drop_duplicates(subset=["Ссылка на страницу объекта"])
 
+        # Сортировка всей базы от новых к старым
         if not df.empty and "Дата публикации" in df.columns:
             df = df.sort_values(by="Дата публикации", ascending=False)
 
         df_to_save = df.drop(columns=["_highlight"]) if "_highlight" in df.columns else df
         df_to_save.to_excel(writer, sheet_name=region_name, index=False)
         
+        # Подсветка строк с террасой, бассейном или патио мягким красным цветом
         worksheet = writer.sheets[region_name]
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
@@ -230,9 +210,9 @@ def send_email(file_path):
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
     msg['To'] = RECEIVER_EMAIL
-    msg['Subject'] = f"🏠 Персональный отчёт по недвижимости для Ханны — {datetime.date.today()}"
+    msg['Subject'] = f"🏠 Полная база недвижимости для Ханны — {datetime.date.today()}"
 
-    body = "Привет! Во вложении твой персональный аналитический отчёт по недвижимости (Мадрид, Толедо до 70км, Гвадалахара до 70км).\n\nСтроки с террасой, бассейном или патио выделены мягким красным цветом. Все объекты отфильтрованы по твоим строгим критериям и отсортированы от новых к старым."
+    body = "Привет! Во вложении твой полный аналитический отчёт по недвижимости (Мадрид, Толедо до 70км, Гвадалахара до 70км).\n\nСобрана вся актуальная база с сайта по твоим критериям (цена до 150к, от 70м², от 2 комнат), отсортированная от новых к старым. Объекты с террасой, бассейном или патио выделены мягким красным цветом."
     msg.attach(MIMEText(body, 'plain'))
 
     with open(file_path, "rb") as f:
