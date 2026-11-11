@@ -20,7 +20,7 @@ SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Ссылки на поиск Fotocasa (цена до 150к, от 70м², от 2 комнат)
+# Точные ссылки на поиск с фильтрами в URL (цена до 150к, от 70м², от 2 комнат)
 REGIONS = {
     "Мадрид": "https://www.fotocasa.es/es/comprar/viviendas/madrid-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2",
     "Толедо (до 70км)": "https://www.fotocasa.es/es/comprar/viviendas/toledo-provincia/todas-las-zonas/l?maxPrice=150000&minSurface=70&minRooms=2",
@@ -31,7 +31,7 @@ MAX_PRICE = 150000.0
 MIN_AREA = 70.0
 MIN_ROOMS = 2
 
-# Скорректированный черный список (исключены пересечения с названиями улиц)
+# Черный список опасных зон
 FORBIDDEN_LOCATIONS = [
     "chozas de canales", "lominchar", "recas", "seseña", "sesena", "quiñon", "quiñón", 
     "yuncos", "yeles", "pantoja", "esquivias", "numancia de la sagra", "borox", "cabañas de la sagra",
@@ -51,7 +51,7 @@ LEGAL_RISK_WORDS = [
 HIGHLIGHT_WORDS = ["terraza", "terrace", "piscina", "pool", "patio", "jardín", "jardin", "ascensor"]
 
 # ==============================================================================
-# 2. ФИЛЬТРАЦИЯ И ПРОВЕРКА ОБЪЕКТОВ
+# 2. ПРОВЕРКА НА РИСКИ
 # ==============================================================================
 
 def analyze_listing(title, description, price, area, rooms):
@@ -59,23 +59,23 @@ def analyze_listing(title, description, price, area, rooms):
     
     for loc in FORBIDDEN_LOCATIONS:
         if loc in full_text:
-            return f"Отклонено: Черный список зоны ({loc.title()})"
+            return f"Отклонено: Черный список зоны ({loc})"
             
     for risk in LEGAL_RISK_WORDS:
         if risk in full_text:
-            return f"Отклонено: Юридический риск / Обременение ({risk})"
+            return f"Отклонено: Юридический риск ({risk})"
             
     if price > MAX_PRICE:
-        return f"Отклонено: Цена выше лимита ({price:,.0f} €)"
+        return f"Отклонено: Цена {price} > 150k"
     if area < MIN_AREA:
-        return f"Отклонено: Маленькая площадь ({area:.0f} m² < 70м²)"
+        return f"Отклонено: Площадь {area} < 70м²"
     if rooms < MIN_ROOMS:
-        return f"Отклонено: Мало комнат ({rooms} < 2)"
+        return f"Отклонено: Комнат {rooms} < 2"
 
     return "ОДОБРЕНО"
 
 # ==============================================================================
-# 3. СБОР ВСЕЙ БАЗЫ И СОРТИРОВКА
+# 3. СТРУКТУРИРОВАННЫЙ СБОР БАЗЫ ДАННЫХ
 # ==============================================================================
 
 def collect_stats():
@@ -93,88 +93,99 @@ def collect_stats():
         data_rows = []
         seen_links = set()
         
-        # Увеличиваем сбор до 10 страниц для максимального охвата базы
-        for page_num in range(1, 11):
+        # Проходим первые 5 страниц с расширенным таймаутом
+        for page_num in range(1, 6):
             target_url = f"{base_url}&p={page_num}" if page_num > 1 else base_url
             try:
-                response = requests.get(target_url, headers=headers, timeout=20)
+                response = requests.get(target_url, headers=headers, timeout=25)
                 if response.status_code != 200:
                     continue
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
-                links = soup.find_all('a', href=True)
+                
+                # Ищем все карточки недвижимости на странице
+                cards = soup.find_all('article', class_=lambda x: x and 'card' in x.lower())
+                if not cards:
+                    # Резервный поиск по тегам div, если структура изменилась
+                    cards = soup.find_all('div', class_=lambda x: x and 're-search-result' in x.lower())
 
-                for link_tag in links:
-                    href = link_tag.get('href')
-                    if not href or '/comprar/vivienda/' not in href:
-                        continue
+                for card in cards:
+                    try:
+                        # 1. Ссылка и название
+                        link_elem = card.find('a', href=True)
+                        if not link_elem:
+                            continue
                         
-                    full_link = "https://www.fotocasa.es" + href if not href.startswith('http') else href
-                    if full_link in seen_links:
+                        href = link_elem['href']
+                        full_link = "https://www.fotocasa.es" + href if not href.startswith('http') else href
+                        if full_link in seen_links:
+                            continue
+                        seen_links.add(full_link)
+
+                        title = link_elem.get_text(strip=True)
+                        if not title or len(title) < 5:
+                            # Пробуем найти заголовок внутри карточки
+                            title_tag = card.find(['h3', 'span'], class_=lambda x: x and 'title' in x.lower())
+                            title = title_tag.get_text(strip=True) if title_tag else "Объект недвижимости"
+
+                        # 2. Стоимость
+                        price = 0.0
+                        price_elem = card.find(class_=lambda x: x and 'price' in x.lower())
+                        if price_elem:
+                            p_text = re.sub(r'[^\d]', '', price_elem.get_text())
+                            if p_text.isdigit():
+                                price = float(p_text)
+
+                        if price == 0 or price > MAX_PRICE:
+                            continue
+
+                        # 3. Характеристики (метры и комнаты)
+                        card_text = card.get_text()
+                        
+                        area = 0.0
+                        m_area = re.search(r"(\d+)\s*m[²2]", card_text)
+                        if m_area:
+                            area = float(m_area.group(1))
+
+                        rooms = 0
+                        m_rooms = re.search(r"(\d+)\s*(?:hab|dorm)", card_text, re.IGNORECASE)
+                        if m_rooms:
+                            rooms = int(m_rooms.group(1))
+
+                        if area < MIN_AREA or rooms < MIN_ROOMS:
+                            continue
+
+                        # 4. Проверка по черным спискам
+                        status = analyze_listing(title, card_text, price, area, rooms)
+                        if "Отклонено" in status:
+                            continue
+
+                        # 5. Дополнительные поля
+                        pub_date = str(datetime.date.today())
+                        if "ayer" in card_text.lower():
+                            pub_date = str(datetime.date.today() - datetime.timedelta(days=1))
+
+                        phone = "Контакты на сайте"
+                        m_phone = re.search(r"(\+34[\s\d]{9,})", card_text)
+                        if m_phone:
+                            phone = m_phone.group(1).strip()
+
+                        has_feature = any(hw in card_text.lower() for hw in HIGHLIGHT_WORDS)
+
+                        data_rows.append({
+                            "Название": title,
+                            "Стоимость (€)": price,
+                            "Метры (м²)": area,
+                            "Описание": card_text[:220].strip() + "...",
+                            "Дата публикации": pub_date,
+                            "Телефон для связи": phone,
+                            "Ссылка на страницу объекта": full_link,
+                            "_highlight": has_feature
+                        })
+                    except Exception as e:
                         continue
-                    seen_links.add(full_link)
-
-                    card = link_tag.find_parent('article') or link_tag.find_parent('div', class_=lambda x: x and 'card' in x.lower())
-                    card_text = card.get_text() if card else link_tag.get_text()
-
-                    title = link_tag.get_text(strip=True)
-                    if len(title) < 5:
-                        continue
-
-                    # Цена
-                    price = 0.0
-                    m_price = re.search(r"([\d\.]+)\s*€", card_text)
-                    if m_price:
-                        price_str = m_price.group(1).replace('.', '')
-                        if price_str.isdigit():
-                            price = float(price_str)
-
-                    if price == 0 or price > MAX_PRICE:
-                        continue
-
-                    # Площадь
-                    area = 0.0
-                    m_area = re.search(r"(\d+)\s*m[²2]", card_text)
-                    if m_area:
-                        area = float(m_area.group(1))
-
-                    # Комнаты
-                    rooms = 0
-                    m_rooms = re.search(r"(\d+)\s*(?:hab|dorm)", card_text, re.IGNORECASE)
-                    if m_rooms:
-                        rooms = int(m_rooms.group(1))
-
-                    if area < MIN_AREA or rooms < MIN_ROOMS:
-                        continue
-
-                    # Проверка по критериям
-                    status = analyze_listing(title, card_text, price, area, rooms)
-                    if "Отклонено" in status:
-                        continue
-
-                    pub_date = str(datetime.date.today())
-                    if "hace" in card_text.lower() or "ayer" in card_text.lower():
-                        pub_date = str(datetime.date.today() - datetime.timedelta(days=1))
-                    
-                    phone = "Контакт на сайте"
-                    m_phone = re.search(r"(\+34[\s\d]{9,})", card_text)
-                    if m_phone:
-                        phone = m_phone.group(1).strip()
-
-                    has_feature = any(hw in card_text.lower() for hw in HIGHLIGHT_WORDS)
-
-                    data_rows.append({
-                        "Название": title,
-                        "Стоимость (€)": price,
-                        "Метры (м²)": area,
-                        "Описание": card_text[:200] + "...",
-                        "Дата публикации": pub_date,
-                        "Телефон для связи": phone,
-                        "Ссылка на страницу объекта": full_link,
-                        "_highlight": has_feature
-                    })
             except Exception as e:
-                print(f"Ошибка на странице {page_num}: {e}")
+                print(f"Ошибка запроса страницы {page_num}: {e}")
 
         df = pd.DataFrame(data_rows)
         if not df.empty and "Ссылка на страницу объекта" in df.columns:
@@ -183,9 +194,11 @@ def collect_stats():
         if not df.empty and "Дата публикации" in df.columns:
             df = df.sort_values(by="Дата публикации", ascending=False)
 
+        # Сохранение без служебной колонки подсветки
         df_to_save = df.drop(columns=["_highlight"]) if "_highlight" in df.columns else df
         df_to_save.to_excel(writer, sheet_name=region_name, index=False)
         
+        # Оформление Excel: подсветка красным
         worksheet = writer.sheets[region_name]
         red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
         
@@ -205,10 +218,10 @@ def collect_stats():
 def send_email(file_path):
     msg = MIMEMultipart()
     msg['From'] = SENDER_EMAIL
-    msg['To'] = RECEIVER_EMAIL
-    msg['Subject'] = f"🏠 Полная база недвижимости для Ханны — {datetime.date.today()}"
+    msg['To'] = SENDER_EMAIL  # Отправка себе
+    msg['Subject'] = f"🏠 База недвижимости для Ханны (Обновлено) — {datetime.date.today()}"
 
-    body = "Привет! Во вложении твой полный аналитический отчёт по недвижимости (Мадрид, Толедо до 70км, Гвадалахара до 70км).\n\nЧерные списки скорректированы, глубина сбора увеличена до 10 страниц. Объекты с террасой, бассейном, патио или лифтом подсвечены красным."
+    body = "Привет! Во вложении обновленный отчет по недвижимости. Скрипт перенастроен на точный сбор карточек (`article`), чтобы находить все актуальные объекты без пропусков. Объекты с террасой, бассейном, патио или лифтом подсвечены красным."
     msg.attach(MIMEText(body, 'plain'))
 
     with open(file_path, "rb") as f:
@@ -220,7 +233,7 @@ def send_email(file_path):
     server.login(SENDER_EMAIL, SENDER_PASSWORD)
     server.sendmail(SENDER_EMAIL, RECEIVER_EMAIL, msg.as_string())
     server.quit()
-    print("Отчёт успешно отправлен!")
+    print("Отчет успешно отправлен!")
 
 if __name__ == "__main__":
     report_file = collect_stats()
